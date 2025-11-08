@@ -68,7 +68,7 @@ Access the addon from the 3D Viewport sidebar:
 
 ## Requirements
 
-- Blender 3.0.0 or higher
+- Blender 3.0.0 or higher (Works with versions up to 4.5.4 LTS currently)
 
 ## Author
 
