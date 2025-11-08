@@ -2,6 +2,9 @@
 
 A comprehensive Blender addon for texture management, material conversion, and batch mesh operations.
 
+<img width="516" height="449" alt="image" src="https://github.com/user-attachments/assets/63e85481-7f86-4e13-9e45-f819691a2baf" />
+
+
 ## Features
 
 ### Texture Export
