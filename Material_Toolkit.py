@@ -156,7 +156,7 @@ class MATERIAL_OT_convert_to_principled(Operator):
         print("STARTING MATERIAL CONVERSION")
         print("="*60 + "\n")
         
-        print("PHASE 1: Caching textures from all materials...")
+        print("PHASE 1: Scanning and classifying textures from all materials...")
         material_cache = {}
         total_materials = len([m for m in bpy.data.materials if m.use_nodes])
         cached_count = 0
@@ -166,16 +166,19 @@ class MATERIAL_OT_convert_to_principled(Operator):
                 continue
             
             nodes = mat.node_tree.nodes
+            links = mat.node_tree.links
             
-            texture_info = self.find_diffuse_texture_node(nodes, mat.name)
+            texture_data = self.scan_all_textures(nodes, links, mat.name)
             
-            if texture_info:
-                material_cache[mat.name] = texture_info
+            if texture_data['textures']:
+                material_cache[mat.name] = texture_data
                 cached_count += 1
-                print(f"[{cached_count}/{total_materials}] Cached: '{mat.name}' -> {texture_info['node'].image.name} (projection: {texture_info['node'].projection})")
+                roles = [r for r in texture_data['textures'].keys()]
+                family = texture_data.get('family_root', 'unknown')
+                print(f"[{cached_count}/{total_materials}] Cached: '{mat.name}' -> family: '{family}' roles: {roles}")
                 time.sleep(0.01)
         
-        print(f"\n Caching complete: {cached_count} textures cached")
+        print(f"\nCaching complete: {cached_count} materials with textures cached")
         print(f"Waiting 0.5 seconds before conversion...\n")
         time.sleep(0.5)
         
@@ -209,75 +212,240 @@ class MATERIAL_OT_convert_to_principled(Operator):
                     skipped_count += 1
                     continue
                 
-                texture_info = material_cache[mat.name]
-                old_tex_node = texture_info['node']
-                
-                image = old_tex_node.image
+                texture_data = material_cache[mat.name]
+                uv_info = texture_data['uv_info']
+                textures = texture_data['textures']
                 
                 nodes.clear()
                 time.sleep(0.005)
                 
-                tex_node = nodes.new(type='ShaderNodeTexImage')
-                tex_node.image = image
-                tex_node.location = (-400, 0)
-                
-                tex_node.interpolation = old_tex_node.interpolation
-                tex_node.projection = old_tex_node.projection
-                tex_node.extension = old_tex_node.extension
-                
-                if tex_node.image and tex_node.image.colorspace_settings:
-                    tex_node.image.colorspace_settings.name = 'sRGB'
-                
-                if texture_info['vector_connected']:
-                    if texture_info['has_uvmap']:
-                        uvmap = nodes.new(type='ShaderNodeUVMap')
-                        uvmap.location = (-700, 0)
-                        uvmap.uv_map = texture_info['uvmap_name']
-                        links.new(uvmap.outputs['UV'], tex_node.inputs['Vector'])
-                        print(f"Restored UV Map: {texture_info['uvmap_name']}")
-                    
-                    elif texture_info['has_mapping']:
-                        mapping = nodes.new(type='ShaderNodeMapping')
-                        mapping.location = (-700, 0)
-                        mapping.inputs['Location'].default_value = texture_info['mapping_location']
-                        mapping.inputs['Rotation'].default_value = texture_info['mapping_rotation']
-                        mapping.inputs['Scale'].default_value = texture_info['mapping_scale']
-                        
-                        if texture_info['has_uvmap']:
-                            uvmap = nodes.new(type='ShaderNodeUVMap')
-                            uvmap.location = (-1000, 0)
-                            uvmap.uv_map = texture_info['uvmap_name']
-                            links.new(uvmap.outputs['UV'], mapping.inputs['Vector'])
-                            links.new(mapping.outputs['Vector'], tex_node.inputs['Vector'])
-                        elif texture_info['has_texcoord']:
-                            tex_coord = nodes.new(type='ShaderNodeTexCoord')
-                            tex_coord.location = (-1000, 0)
-                            links.new(tex_coord.outputs[texture_info['coord_output']], mapping.inputs['Vector'])
-                            links.new(mapping.outputs['Vector'], tex_node.inputs['Vector'])
-                        else:
-                            links.new(mapping.outputs['Vector'], tex_node.inputs['Vector'])
-                    
-                    elif texture_info['has_texcoord']:
-                        tex_coord = nodes.new(type='ShaderNodeTexCoord')
-                        tex_coord.location = (-700, 0)
-                        links.new(tex_coord.outputs[texture_info['coord_output']], tex_node.inputs['Vector'])
-                
                 principled = nodes.new(type='ShaderNodeBsdfPrincipled')
-                principled.location = (0, 0)
+                principled.location = (200, 0)
                 
                 output = nodes.new(type='ShaderNodeOutputMaterial')
-                output.location = (300, 0)
-                
-                links.new(tex_node.outputs['Color'], principled.inputs['Base Color'])
+                output.location = (500, 0)
                 links.new(principled.outputs['BSDF'], output.inputs['Surface'])
                 
-                mat.blend_method = 'OPAQUE'
-                if hasattr(mat, 'shadow_method'):
-                    mat.shadow_method = 'OPAQUE'
+                uv_chain_output = None
+                if uv_info['vector_connected']:
+                    if uv_info['has_uvmap'] and not uv_info['has_mapping']:
+                        uvmap = nodes.new(type='ShaderNodeUVMap')
+                        uvmap.location = (-800, 0)
+                        uvmap.uv_map = uv_info['uvmap_name']
+                        uv_chain_output = uvmap.outputs['UV']
+                    elif uv_info['has_mapping']:
+                        mapping = nodes.new(type='ShaderNodeMapping')
+                        mapping.location = (-600, 0)
+                        mapping.inputs['Location'].default_value = uv_info['mapping_location']
+                        mapping.inputs['Rotation'].default_value = uv_info['mapping_rotation']
+                        mapping.inputs['Scale'].default_value = uv_info['mapping_scale']
+                        
+                        if uv_info['has_uvmap']:
+                            uvmap = nodes.new(type='ShaderNodeUVMap')
+                            uvmap.location = (-900, 0)
+                            uvmap.uv_map = uv_info['uvmap_name']
+                            links.new(uvmap.outputs['UV'], mapping.inputs['Vector'])
+                        elif uv_info['has_texcoord']:
+                            tex_coord = nodes.new(type='ShaderNodeTexCoord')
+                            tex_coord.location = (-900, 0)
+                            links.new(tex_coord.outputs[uv_info['coord_output']], mapping.inputs['Vector'])
+                        
+                        uv_chain_output = mapping.outputs['Vector']
+                    elif uv_info['has_texcoord']:
+                        tex_coord = nodes.new(type='ShaderNodeTexCoord')
+                        tex_coord.location = (-800, 0)
+                        uv_chain_output = tex_coord.outputs[uv_info['coord_output']]
+                
+                y_offset = 300
+                has_alpha = False
+                diffuse_node = None
+                ao_node = None
+                
+                if 'diffuse' in textures:
+                    tex_info = textures['diffuse']
+                    tex_node = nodes.new(type='ShaderNodeTexImage')
+                    tex_node.image = tex_info['image']
+                    tex_node.location = (-300, y_offset)
+                    tex_node.interpolation = tex_info['interpolation']
+                    tex_node.projection = tex_info['projection']
+                    tex_node.extension = tex_info['extension']
+                    if tex_node.image and tex_node.image.colorspace_settings:
+                        tex_node.image.colorspace_settings.name = 'sRGB'
+                    if uv_chain_output:
+                        links.new(uv_chain_output, tex_node.inputs['Vector'])
+                    diffuse_node = tex_node
+                    y_offset -= 300
+                
+                if 'ao' in textures:
+                    tex_info = textures['ao']
+                    tex_node = nodes.new(type='ShaderNodeTexImage')
+                    tex_node.image = tex_info['image']
+                    tex_node.location = (-300, y_offset)
+                    tex_node.interpolation = tex_info['interpolation']
+                    tex_node.projection = tex_info['projection']
+                    tex_node.extension = tex_info['extension']
+                    if tex_node.image and tex_node.image.colorspace_settings:
+                        tex_node.image.colorspace_settings.name = 'Non-Color'
+                    if uv_chain_output:
+                        links.new(uv_chain_output, tex_node.inputs['Vector'])
+                    ao_node = tex_node
+                    y_offset -= 300
+                
+                if diffuse_node and ao_node:
+                    mix_node = nodes.new(type='ShaderNodeMix')
+                    mix_node.data_type = 'RGBA'
+                    mix_node.blend_type = 'MULTIPLY'
+                    mix_node.location = (0, 200)
+                    mix_node.inputs['Factor'].default_value = 1.0
+                    links.new(diffuse_node.outputs['Color'], mix_node.inputs[6])
+                    links.new(ao_node.outputs['Color'], mix_node.inputs[7])
+                    links.new(mix_node.outputs[2], principled.inputs['Base Color'])
+                elif diffuse_node:
+                    links.new(diffuse_node.outputs['Color'], principled.inputs['Base Color'])
+                
+                if 'normal' in textures:
+                    tex_info = textures['normal']
+                    tex_node = nodes.new(type='ShaderNodeTexImage')
+                    tex_node.image = tex_info['image']
+                    tex_node.location = (-300, y_offset)
+                    tex_node.interpolation = tex_info['interpolation']
+                    tex_node.projection = tex_info['projection']
+                    tex_node.extension = tex_info['extension']
+                    if tex_node.image and tex_node.image.colorspace_settings:
+                        tex_node.image.colorspace_settings.name = 'Non-Color'
+                    if uv_chain_output:
+                        links.new(uv_chain_output, tex_node.inputs['Vector'])
+                    
+                    normal_map = nodes.new(type='ShaderNodeNormalMap')
+                    normal_map.location = (0, y_offset)
+                    links.new(tex_node.outputs['Color'], normal_map.inputs['Color'])
+                    links.new(normal_map.outputs['Normal'], principled.inputs['Normal'])
+                    y_offset -= 300
+                
+                if 'packed_rm' in textures:
+                    tex_info = textures['packed_rm']
+                    tex_node = nodes.new(type='ShaderNodeTexImage')
+                    tex_node.image = tex_info['image']
+                    tex_node.location = (-300, y_offset)
+                    tex_node.interpolation = tex_info['interpolation']
+                    tex_node.projection = tex_info['projection']
+                    tex_node.extension = tex_info['extension']
+                    if tex_node.image and tex_node.image.colorspace_settings:
+                        tex_node.image.colorspace_settings.name = 'Non-Color'
+                    if uv_chain_output:
+                        links.new(uv_chain_output, tex_node.inputs['Vector'])
+                    
+                    sep_rgb = nodes.new(type='ShaderNodeSeparateColor')
+                    sep_rgb.location = (0, y_offset)
+                    links.new(tex_node.outputs['Color'], sep_rgb.inputs['Color'])
+                    
+                    if 'roughness' not in textures:
+                        links.new(sep_rgb.outputs['Red'], principled.inputs['Roughness'])
+                    if 'metallic' not in textures:
+                        links.new(sep_rgb.outputs['Green'], principled.inputs['Metallic'])
+                    
+                    y_offset -= 300
+                
+                if 'roughness' in textures:
+                    tex_info = textures['roughness']
+                    tex_node = nodes.new(type='ShaderNodeTexImage')
+                    tex_node.image = tex_info['image']
+                    tex_node.location = (-300, y_offset)
+                    tex_node.interpolation = tex_info['interpolation']
+                    tex_node.projection = tex_info['projection']
+                    tex_node.extension = tex_info['extension']
+                    if tex_node.image and tex_node.image.colorspace_settings:
+                        tex_node.image.colorspace_settings.name = 'Non-Color'
+                    if uv_chain_output:
+                        links.new(uv_chain_output, tex_node.inputs['Vector'])
+                    links.new(tex_node.outputs['Color'], principled.inputs['Roughness'])
+                    y_offset -= 300
+                
+                if 'metallic' in textures:
+                    tex_info = textures['metallic']
+                    tex_node = nodes.new(type='ShaderNodeTexImage')
+                    tex_node.image = tex_info['image']
+                    tex_node.location = (-300, y_offset)
+                    tex_node.interpolation = tex_info['interpolation']
+                    tex_node.projection = tex_info['projection']
+                    tex_node.extension = tex_info['extension']
+                    if tex_node.image and tex_node.image.colorspace_settings:
+                        tex_node.image.colorspace_settings.name = 'Non-Color'
+                    if uv_chain_output:
+                        links.new(uv_chain_output, tex_node.inputs['Vector'])
+                    links.new(tex_node.outputs['Color'], principled.inputs['Metallic'])
+                    y_offset -= 300
+                
+                if 'specular' in textures:
+                    tex_info = textures['specular']
+                    tex_node = nodes.new(type='ShaderNodeTexImage')
+                    tex_node.image = tex_info['image']
+                    tex_node.location = (-300, y_offset)
+                    tex_node.interpolation = tex_info['interpolation']
+                    tex_node.projection = tex_info['projection']
+                    tex_node.extension = tex_info['extension']
+                    if tex_node.image and tex_node.image.colorspace_settings:
+                        tex_node.image.colorspace_settings.name = 'Non-Color'
+                    if uv_chain_output:
+                        links.new(uv_chain_output, tex_node.inputs['Vector'])
+                    if 'Specular IOR Level' in principled.inputs:
+                        links.new(tex_node.outputs['Color'], principled.inputs['Specular IOR Level'])
+                    elif 'Specular' in principled.inputs:
+                        links.new(tex_node.outputs['Color'], principled.inputs['Specular'])
+                    y_offset -= 300
+                
+                if 'emission' in textures:
+                    tex_info = textures['emission']
+                    tex_node = nodes.new(type='ShaderNodeTexImage')
+                    tex_node.image = tex_info['image']
+                    tex_node.location = (-300, y_offset)
+                    tex_node.interpolation = tex_info['interpolation']
+                    tex_node.projection = tex_info['projection']
+                    tex_node.extension = tex_info['extension']
+                    if tex_node.image and tex_node.image.colorspace_settings:
+                        tex_node.image.colorspace_settings.name = 'sRGB'
+                    if uv_chain_output:
+                        links.new(uv_chain_output, tex_node.inputs['Vector'])
+                    if 'Emission Color' in principled.inputs:
+                        links.new(tex_node.outputs['Color'], principled.inputs['Emission Color'])
+                    elif 'Emission' in principled.inputs:
+                        links.new(tex_node.outputs['Color'], principled.inputs['Emission'])
+                    if 'Emission Strength' in principled.inputs:
+                        principled.inputs['Emission Strength'].default_value = 1.0
+                    y_offset -= 300
+                
+                if 'alpha' in textures:
+                    tex_info = textures['alpha']
+                    tex_node = nodes.new(type='ShaderNodeTexImage')
+                    tex_node.image = tex_info['image']
+                    tex_node.location = (-300, y_offset)
+                    tex_node.interpolation = tex_info['interpolation']
+                    tex_node.projection = tex_info['projection']
+                    tex_node.extension = tex_info['extension']
+                    if tex_node.image and tex_node.image.colorspace_settings:
+                        tex_node.image.colorspace_settings.name = 'Non-Color'
+                    if uv_chain_output:
+                        links.new(uv_chain_output, tex_node.inputs['Vector'])
+                    links.new(tex_node.outputs['Color'], principled.inputs['Alpha'])
+                    has_alpha = True
+                    y_offset -= 300
+                elif diffuse_node and textures.get('diffuse', {}).get('has_alpha', False):
+                    links.new(diffuse_node.outputs['Alpha'], principled.inputs['Alpha'])
+                    has_alpha = True
+                
+                if has_alpha:
+                    mat.blend_method = 'CLIP'
+                    if hasattr(mat, 'shadow_method'):
+                        mat.shadow_method = 'CLIP'
+                else:
+                    mat.blend_method = 'OPAQUE'
+                    if hasattr(mat, 'shadow_method'):
+                        mat.shadow_method = 'OPAQUE'
                 mat.use_backface_culling = False
                 
                 converted_count += 1
-                print(f"[{converted_count}] '{mat.name}' -> {image.name}")
+                roles = list(textures.keys())
+                print(f"[{converted_count}] '{mat.name}' -> {roles}")
                 time.sleep(0.01)
                 
             except Exception as e:
@@ -297,7 +465,7 @@ class MATERIAL_OT_convert_to_principled(Operator):
         print(f"Converted: {converted_count}")
         print(f"Skipped: {skipped_count}")
         if error_count > 0:
-            print(f"✗ Errors: {error_count}")
+            print(f"Errors: {error_count}")
         print("="*60 + "\n")
         
         if error_count > 0:
@@ -306,6 +474,480 @@ class MATERIAL_OT_convert_to_principled(Operator):
             self.report({'INFO'}, f"Successfully converted {converted_count} materials, skipped {skipped_count}")
         
         return {'FINISHED'}
+    
+    def extract_family_root(self, texture_name):
+        name = texture_name.lower()
+        name = re.sub(r'\.[^.]+$', '', name)
+        
+        pbr_suffixes = [
+            r'[_-]diffuse$', r'[_-]albedo$', r'[_-]basecolor$', r'[_-]base_color$',
+            r'[_-]normal$', r'[_-]norm$', r'[_-]nrm$',
+            r'[_-]roughness$', r'[_-]rough$', r'[_-]rgh$',
+            r'[_-]metallic$', r'[_-]metalness$', r'[_-]metal$', r'[_-]mtl$',
+            r'[_-]specular$', r'[_-]spec$',
+            r'[_-]emission$', r'[_-]emissive$', r'[_-]emit$', r'[_-]glow$',
+            r'[_-]occlusion$', r'[_-]occ$',
+            r'[_-]opacity$', r'[_-]alpha$', r'[_-]trans$', r'[_-]transparency$',
+            r'[_-]orm$', r'[_-]rma$', r'[_-]arm$', r'[_-]mra$', r'[_-]rm$',
+            r'[_-]ao$', r'[_-]d$', r'[_-]n$', r'[_-]m$', r'[_-]r$', r'[_-]s$',
+            r'[_-]e$', r'[_-]a$', r'[_-]col$', r'[_-]nor$', r'[_-]diff$',
+        ]
+        
+        for suffix in pbr_suffixes:
+            name = re.sub(suffix, '', name)
+        
+        name = re.sub(r'[_-][ab]$', '', name, flags=re.IGNORECASE)
+        
+        return name
+    
+    def texture_belongs_to_family(self, texture_name, family_root):
+        if not family_root:
+            return True
+        
+        tex_lower = texture_name.lower()
+        tex_lower = re.sub(r'\.[^.]+$', '', tex_lower)
+        
+        if tex_lower.startswith(family_root):
+            return True
+        
+        tex_root = self.extract_family_root(texture_name)
+        if tex_root == family_root:
+            return True
+        
+        min_match = int(len(family_root) * 0.6)
+        if min_match > 5 and family_root[:min_match] == tex_root[:min_match]:
+            return True
+        
+        return False
+    
+    def find_diffuse_texture(self, tex_nodes, nodes, links):
+        for tex_node in tex_nodes:
+            role = self.get_role_from_connections(tex_node, links)
+            if role == 'diffuse':
+                return tex_node
+        
+        for tex_node in tex_nodes:
+            if tex_node.image:
+                name_lower = tex_node.image.name.lower()
+                if re.search(r'[_-](d|diff|diffuse|albedo|basecolor|base_color|col)\.', name_lower):
+                    return tex_node
+                if re.search(r'[_-](d|diff|diffuse|albedo|basecolor|base_color|col)$', re.sub(r'\.[^.]+$', '', name_lower)):
+                    return tex_node
+        
+        for tex_node in tex_nodes:
+            if tex_node.image:
+                name_lower = tex_node.image.name.lower()
+                if any(kw in name_lower for kw in ['diffuse', 'albedo', 'basecolor', 'base_color']):
+                    return tex_node
+        
+        non_diffuse_indicators = ['_n.', '_n_', '_m.', '_m_', '_r.', '_r_', '_rm', '_orm', 
+                                   '_ao', '_occ', 'normal', 'rough', 'metal', 'spec']
+        for tex_node in tex_nodes:
+            if tex_node.image:
+                name_lower = tex_node.image.name.lower()
+                is_connected = any(out.is_linked for out in tex_node.outputs)
+                if is_connected and not any(ind in name_lower for ind in non_diffuse_indicators):
+                    return tex_node
+        
+        for tex_node in tex_nodes:
+            if tex_node.image:
+                name_lower = tex_node.image.name.lower()
+                if not any(ind in name_lower for ind in non_diffuse_indicators):
+                    return tex_node
+        
+        return tex_nodes[0] if tex_nodes else None
+    
+    def scan_all_textures(self, nodes, links, material_name):
+        result = {
+            'textures': {},
+            'uv_info': {
+                'vector_connected': False,
+                'has_mapping': False,
+                'has_texcoord': False,
+                'has_uvmap': False,
+                'uvmap_name': '',
+                'coord_output': 'UV',
+                'mapping_location': (0.0, 0.0, 0.0),
+                'mapping_rotation': (0.0, 0.0, 0.0),
+                'mapping_scale': (1.0, 1.0, 1.0)
+            },
+            'family_root': None
+        }
+        
+        tex_nodes = [n for n in nodes if n.type == 'TEX_IMAGE' and n.image]
+        if not tex_nodes:
+            return result
+        
+        diffuse_tex_node = self.find_diffuse_texture(tex_nodes, nodes, links)
+        
+        if not diffuse_tex_node or not diffuse_tex_node.image:
+            return result
+        
+        family_root = self.extract_family_root(diffuse_tex_node.image.name)
+        if not family_root or len(family_root) < 3:
+            family_root = self.extract_family_root(material_name)
+        
+        result['family_root'] = family_root
+        
+        family_tex_nodes = []
+        for tex_node in tex_nodes:
+            if tex_node.image:
+                if self.texture_belongs_to_family(tex_node.image.name, family_root):
+                    family_tex_nodes.append(tex_node)
+                else:
+                    print(f"    [FILTERED] '{tex_node.image.name}' excluded - doesn't match family '{family_root}'")
+        
+        if not family_tex_nodes:
+            family_tex_nodes = [diffuse_tex_node]
+        
+        variant_key = self.detect_variant_key(family_tex_nodes)
+        if variant_key:
+            family_tex_nodes = self.filter_textures_by_variant(family_tex_nodes, variant_key)
+        
+        uv_extracted = False
+        classified = {}
+        
+        if diffuse_tex_node in family_tex_nodes:
+            tex_info = {
+                'image': diffuse_tex_node.image,
+                'interpolation': diffuse_tex_node.interpolation,
+                'projection': diffuse_tex_node.projection,
+                'extension': diffuse_tex_node.extension,
+                'has_alpha': self.image_has_alpha(diffuse_tex_node.image)
+            }
+            classified['diffuse'] = tex_info
+            
+            uv_info = self.extract_texture_info(diffuse_tex_node)
+            result['uv_info'] = {
+                'vector_connected': uv_info['vector_connected'],
+                'has_mapping': uv_info['has_mapping'],
+                'has_texcoord': uv_info['has_texcoord'],
+                'has_uvmap': uv_info['has_uvmap'],
+                'uvmap_name': uv_info['uvmap_name'],
+                'coord_output': uv_info['coord_output'],
+                'mapping_location': uv_info['mapping_location'],
+                'mapping_rotation': uv_info['mapping_rotation'],
+                'mapping_scale': uv_info['mapping_scale']
+            }
+            uv_extracted = True
+        
+        for tex_node in family_tex_nodes:
+            if tex_node == diffuse_tex_node:
+                continue
+            
+            role = self.classify_texture_role(tex_node, nodes, links)
+            
+            if role and role not in classified:
+                tex_info = {
+                    'image': tex_node.image,
+                    'interpolation': tex_node.interpolation,
+                    'projection': tex_node.projection,
+                    'extension': tex_node.extension,
+                    'has_alpha': self.image_has_alpha(tex_node.image)
+                }
+                classified[role] = tex_info
+                
+                if not uv_extracted:
+                    uv_info = self.extract_texture_info(tex_node)
+                    result['uv_info'] = {
+                        'vector_connected': uv_info['vector_connected'],
+                        'has_mapping': uv_info['has_mapping'],
+                        'has_texcoord': uv_info['has_texcoord'],
+                        'has_uvmap': uv_info['has_uvmap'],
+                        'uvmap_name': uv_info['uvmap_name'],
+                        'coord_output': uv_info['coord_output'],
+                        'mapping_location': uv_info['mapping_location'],
+                        'mapping_rotation': uv_info['mapping_rotation'],
+                        'mapping_scale': uv_info['mapping_scale']
+                    }
+                    uv_extracted = True
+        
+        result['textures'] = classified
+        return result
+    
+    def detect_variant_key(self, tex_nodes):
+        variant_pattern = re.compile(r'[_-]([AB])[_-]', re.IGNORECASE)
+        variant_counts = defaultdict(int)
+        
+        for tex_node in tex_nodes:
+            if tex_node.image:
+                name = tex_node.image.name
+                match = variant_pattern.search(name)
+                if match:
+                    key = match.group(0).upper()
+                    variant_counts[key] += 1
+        
+        if variant_counts:
+            return max(variant_counts, key=variant_counts.get)
+        return None
+    
+    def filter_textures_by_variant(self, tex_nodes, variant_key):
+        filtered = []
+        variant_key_lower = variant_key.lower()
+        
+        for tex_node in tex_nodes:
+            if tex_node.image:
+                name_lower = tex_node.image.name.lower()
+                if variant_key_lower in name_lower:
+                    filtered.append(tex_node)
+                elif not re.search(r'[_-][ab][_-]', name_lower, re.IGNORECASE):
+                    filtered.append(tex_node)
+        
+        return filtered if filtered else tex_nodes
+    
+    def classify_texture_role(self, tex_node, nodes, links):
+        name_lower = (tex_node.image.name if tex_node.image else '').lower()
+        node_name_lower = tex_node.name.lower()
+        combined = name_lower + ' ' + node_name_lower
+        
+        connection_role = self.get_role_from_connections(tex_node, links)
+        if connection_role:
+            if connection_role == 'normal':
+                if self.is_blacklisted_for_normal(combined):
+                    return None
+            return connection_role
+        
+        role = self.classify_by_suffix(name_lower)
+        if role:
+            if role == 'normal' and self.is_blacklisted_for_normal(combined):
+                return None
+            return role
+        
+        role = self.classify_by_keywords(combined)
+        if role == 'normal' and self.is_blacklisted_for_normal(combined):
+            return None
+        return role
+    
+    def is_blacklisted_for_normal(self, combined):
+        blacklist = [
+            '_m.', '_m_', '_metal', '_metallic', '_mtl',
+            '_rm.', '_rm_', '_orm', '_rma', '_arm', '_mra',
+            'multi', '_multi',
+            'mask', '_mask',
+            '_ao', 'ambientocclusion', 'occlusion', '_occ',
+            '_r.', '_r_', '_rough', '_rgh', 'roughness',
+            '_s.', '_s_', '_spec', 'specular',
+            '_d.', '_d_', '_diff', 'diffuse', 'albedo', 'basecolor',
+            '_a.', '_a_', 'alpha', 'opacity', 'trans'
+        ]
+        return any(bl in combined for bl in blacklist)
+    
+    def classify_by_suffix(self, name_lower):
+        suffix_patterns = [
+            (r'[_-]n\.', 'normal'),
+            (r'[_-]n$', 'normal'),
+            (r'[_-]nor\.', 'normal'),
+            (r'[_-]nor$', 'normal'),
+            (r'[_-]norm\.', 'normal'),
+            (r'[_-]norm$', 'normal'),
+            (r'[_-]normal\.', 'normal'),
+            (r'[_-]normal$', 'normal'),
+            (r'[_-]nrm\.', 'normal'),
+            (r'[_-]nrm$', 'normal'),
+            
+            (r'[_-]d\.', 'diffuse'),
+            (r'[_-]d$', 'diffuse'),
+            (r'[_-]diff\.', 'diffuse'),
+            (r'[_-]diff$', 'diffuse'),
+            (r'[_-]diffuse\.', 'diffuse'),
+            (r'[_-]diffuse$', 'diffuse'),
+            (r'[_-]albedo\.', 'diffuse'),
+            (r'[_-]albedo$', 'diffuse'),
+            (r'[_-]basecolor\.', 'diffuse'),
+            (r'[_-]basecolor$', 'diffuse'),
+            (r'[_-]base_color\.', 'diffuse'),
+            (r'[_-]base_color$', 'diffuse'),
+            (r'[_-]col\.', 'diffuse'),
+            (r'[_-]col$', 'diffuse'),
+            
+            (r'[_-]rm\.', 'packed_rm'),
+            (r'[_-]rm$', 'packed_rm'),
+            (r'[_-]orm\.', 'packed_rm'),
+            (r'[_-]orm$', 'packed_rm'),
+            (r'[_-]rma\.', 'packed_rm'),
+            (r'[_-]rma$', 'packed_rm'),
+            (r'[_-]arm\.', 'packed_rm'),
+            (r'[_-]arm$', 'packed_rm'),
+            (r'[_-]mra\.', 'packed_rm'),
+            (r'[_-]mra$', 'packed_rm'),
+            
+            (r'[_-]r\.', 'roughness'),
+            (r'[_-]r$', 'roughness'),
+            (r'[_-]rough\.', 'roughness'),
+            (r'[_-]rough$', 'roughness'),
+            (r'[_-]rgh\.', 'roughness'),
+            (r'[_-]rgh$', 'roughness'),
+            (r'[_-]roughness\.', 'roughness'),
+            (r'[_-]roughness$', 'roughness'),
+            
+            (r'[_-]m\.', 'metallic'),
+            (r'[_-]m$', 'metallic'),
+            (r'[_-]metal\.', 'metallic'),
+            (r'[_-]metal$', 'metallic'),
+            (r'[_-]mtl\.', 'metallic'),
+            (r'[_-]mtl$', 'metallic'),
+            (r'[_-]metallic\.', 'metallic'),
+            (r'[_-]metallic$', 'metallic'),
+            (r'[_-]metalness\.', 'metallic'),
+            (r'[_-]metalness$', 'metallic'),
+            
+            (r'[_-]s\.', 'specular'),
+            (r'[_-]s$', 'specular'),
+            (r'[_-]spec\.', 'specular'),
+            (r'[_-]spec$', 'specular'),
+            (r'[_-]specular\.', 'specular'),
+            (r'[_-]specular$', 'specular'),
+            
+            (r'[_-]e\.', 'emission'),
+            (r'[_-]e$', 'emission'),
+            (r'[_-]emit\.', 'emission'),
+            (r'[_-]emit$', 'emission'),
+            (r'[_-]emiss\.', 'emission'),
+            (r'[_-]emiss$', 'emission'),
+            (r'[_-]emission\.', 'emission'),
+            (r'[_-]emission$', 'emission'),
+            (r'[_-]glow\.', 'emission'),
+            (r'[_-]glow$', 'emission'),
+            
+            (r'[_-]a\.', 'alpha'),
+            (r'[_-]a$', 'alpha'),
+            (r'[_-]alpha\.', 'alpha'),
+            (r'[_-]alpha$', 'alpha'),
+            (r'[_-]opacity\.', 'alpha'),
+            (r'[_-]opacity$', 'alpha'),
+            (r'[_-]trans\.', 'alpha'),
+            (r'[_-]trans$', 'alpha'),
+            (r'[_-]mask\.', 'alpha'),
+            (r'[_-]mask$', 'alpha'),
+            
+            (r'[_-]ao\.', 'ao'),
+            (r'[_-]ao$', 'ao'),
+            (r'[_-]occ\.', 'ao'),
+            (r'[_-]occ$', 'ao'),
+            (r'[_-]occlusion\.', 'ao'),
+            (r'[_-]occlusion$', 'ao'),
+            (r'ambientocclusion', 'ao'),
+            (r'ambient_occlusion', 'ao'),
+        ]
+        
+        base_name = re.sub(r'\.[^.]+$', '', name_lower)
+        
+        for pattern, role in suffix_patterns:
+            if re.search(pattern, base_name) or re.search(pattern, name_lower):
+                return role
+        
+        return None
+    
+    def classify_by_keywords(self, combined):
+        if self.has_strong_normal_indicator(combined):
+            if not self.is_blacklisted_for_normal(combined):
+                return 'normal'
+        
+        packed_kw = ['_rm', '_orm', '_rma', '_arm', '_mra', 'roughnessmetallic']
+        if any(kw in combined for kw in packed_kw):
+            return 'packed_rm'
+        
+        rough_kw = ['rough', 'rgh', 'roughness']
+        if any(kw in combined for kw in rough_kw):
+            if not any(pk in combined for pk in ['_rm', '_orm', '_rma', '_arm', '_mra']):
+                return 'roughness'
+        
+        metal_kw = ['metal', 'mtl', 'metallic', 'metalness']
+        if any(kw in combined for kw in metal_kw):
+            if not any(pk in combined for pk in ['_rm', '_orm', '_rma', '_arm', '_mra']):
+                return 'metallic'
+        
+        spec_kw = ['spec', 'specular']
+        if any(kw in combined for kw in spec_kw):
+            return 'specular'
+        
+        emit_kw = ['emiss', 'emit', 'glow', 'emission']
+        if any(kw in combined for kw in emit_kw):
+            return 'emission'
+        
+        alpha_kw = ['alpha', 'opacity', 'trans', 'transparency']
+        if any(kw in combined for kw in alpha_kw):
+            return 'alpha'
+        
+        ao_kw = ['ambientocclusion', 'ambient_occlusion', 'occlusion']
+        if any(kw in combined for kw in ao_kw):
+            return 'ao'
+        if '_ao' in combined or combined.startswith('ao') or ' ao' in combined:
+            return 'ao'
+        
+        diff_kw = ['diffuse', 'diff', 'albedo', 'basecolor', 'base_color']
+        if any(kw in combined for kw in diff_kw):
+            return 'diffuse'
+        
+        return None
+    
+    def has_strong_normal_indicator(self, combined):
+        strong_patterns = [
+            r'[_-]n[_.\s]',
+            r'[_-]n$',
+            r'[_-]nor[_.\s]',
+            r'[_-]nor$',
+            r'[_-]norm[_.\s]',
+            r'[_-]norm$',
+            r'[_-]normal[_.\s]',
+            r'[_-]normal$',
+            r'[_-]nrm[_.\s]',
+            r'[_-]nrm$',
+            r'\bnormal\b',
+            r'\bnrm\b',
+            r'\bnorm\b',
+            r'normalmap',
+            r'normal_map',
+        ]
+        return any(re.search(p, combined) for p in strong_patterns)
+    
+    def get_role_from_connections(self, tex_node, links):
+        for output in tex_node.outputs:
+            for link in output.links:
+                to_node = link.to_node
+                to_socket = link.to_socket
+                
+                if to_node.type == 'BSDF_PRINCIPLED':
+                    socket_name = to_socket.name.lower()
+                    if 'base color' in socket_name or socket_name == 'color':
+                        return 'diffuse'
+                    elif 'normal' in socket_name:
+                        return 'normal'
+                    elif 'roughness' in socket_name:
+                        return 'roughness'
+                    elif 'metallic' in socket_name:
+                        return 'metallic'
+                    elif 'specular' in socket_name:
+                        return 'specular'
+                    elif 'emission' in socket_name:
+                        return 'emission'
+                    elif 'alpha' in socket_name:
+                        return 'alpha'
+                
+                elif to_node.type == 'NORMAL_MAP':
+                    return 'normal'
+                
+                elif to_node.type == 'BUMP':
+                    return 'normal'
+                
+                elif to_node.type in ['MIX', 'MIX_RGB', 'MIXRGB', 'MIX_SHADER']:
+                    continue
+                
+                elif to_node.type == 'SEPARATE_RGB' or to_node.type == 'SEPARATE_COLOR':
+                    return 'packed_rm'
+        
+        return None
+    
+    def image_has_alpha(self, image):
+        if not image:
+            return False
+        if image.channels >= 4:
+            if image.depth in [32, 128]:
+                return True
+            name_lower = image.name.lower()
+            if any(kw in name_lower for kw in ['alpha', 'rgba', 'transparent']):
+                return True
+        return False
     
     def find_diffuse_texture_node(self, nodes, material_name):
         shader = None
@@ -397,7 +1039,6 @@ class MATERIAL_OT_convert_to_principled(Operator):
             if connected.type == 'UVMAP':
                 info['has_uvmap'] = True
                 info['uvmap_name'] = connected.uv_map
-                print(f"    Found UV Map: {connected.uv_map}")
             
             elif connected.type == 'MAPPING':
                 info['has_mapping'] = True
@@ -412,7 +1053,6 @@ class MATERIAL_OT_convert_to_principled(Operator):
                     if coord_node.type == 'UVMAP':
                         info['has_uvmap'] = True
                         info['uvmap_name'] = coord_node.uv_map
-                        print(f"    Found UV Map (through mapping): {coord_node.uv_map}")
                     
                     elif coord_node.type == 'TEX_COORD':
                         info['has_texcoord'] = True
@@ -580,26 +1220,10 @@ def join_objects_with_materials(context, objs: list, final_name: str):
     
     context.view_layer.objects.active = objs[0]
     
-    all_materials = []
-    material_indices = {}
-    
-    for obj in objs:
-        if obj.data and hasattr(obj.data, 'materials'):
-            for mat in obj.data.materials:
-                if mat and mat not in material_indices:
-                    material_indices[mat] = len(all_materials)
-                    all_materials.append(mat)
-    
     bpy.ops.object.join()
     
     joined = context.view_layer.objects.active
     joined.name = final_name
-    
-    existing_mats = [mat for mat in joined.data.materials if mat]
-    if not existing_mats or len(existing_mats) < len(all_materials):
-        joined.data.materials.clear()
-        for mat in all_materials:
-            joined.data.materials.append(mat)
     
     return joined
 
